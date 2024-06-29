@@ -18,35 +18,61 @@ bonjour.find({ type: "http" }, function (service) {
 });
 
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-  connectedClients[socket.id] = { id: socket.id, role: null, masterIp: null };
-
-  // Broadcast client connection to all (including itself initially)
-  socket.broadcast.emit("clientConnected", {
+  let clientInfo = {
     id: socket.id,
-    ip: socket.handshake.address,
+    role: null,
+    masterIp: null,
+    deviceModel: null,
+  }; // Store client information
+  console.log("Client connected:", socket.id);
+  connectedClients[socket.id] = {
+    id: socket.id,
+    role: null,
+    masterIp: null,
+    deviceModel: null,
+  };
+
+  socket.on("registerDevice", (deviceName) => {
+    connectedClients[socket.id] = {
+      id: socket.id,
+      role: null,
+      masterIp: null,
+      deviceName,
+    };
+    console.log(`Device registered: ${deviceName}`);
+
+    // Broadcast client connection to all (including itself initially)
+    socket.broadcast.emit("clientConnected", {
+      id: socket.id,
+      ip: socket.handshake.address,
+      deviceName: deviceName,
+    });
   });
 
-  let clientInfo = { id: socket.id, role: null, masterIp: null }; // Store client information
-
-  socket.on("setRole", (role, ip) => {
+  socket.on("setRole", (role, ip, deviceModel) => {
     clientInfo.role = role;
     clientInfo.masterIp = ip;
-    console.log(clientInfo.role, clientInfo.masterIp);
+    clientInfo.deviceModel = deviceModel;
+    console.log(clientInfo.role, clientInfo.masterIp, clientInfo.deviceModel);
 
     if (role === "master") {
       connectedClients[socket.id] = { ...clientInfo }; // Add client as master
       io.emit("masterConnected", connectedClients[socket.id]); // Inform all about new master
 
-      socket.on("forwardData", ({ data, senderId, recipientId }) => {
-        console.log(
-          `Forwarding data from ${senderId} to ${recipientId}:`,
-          data
-        );
-        io.to(recipientId).emit("receiveData", { data, senderId });
-
-        console.log("------>", data);
-      });
+      socket.on(
+        "forwardData",
+        ({ data, senderId, recipientId, deviceName }) => {
+          console.log(
+            `Forwarding data from ${senderId} to ${recipientId}: with device :${deviceName}`,
+            data
+          );
+          io.to(recipientId).emit("receiveData", {
+            data,
+            senderId,
+            deviceName,
+          });
+        }
+      );
     } else if (role === "client") {
       // Check if a master is already connected
       const master = Object.values(connectedClients).find(
@@ -54,28 +80,29 @@ io.on("connection", (socket) => {
       );
       if (master) {
         socket.join(master.id); // Join the master's room
-        socket.emit("connectedToMaster", master); // Inform client about connected master
+        //socket.emit("connectedToMaster", master); // Inform client about connected master
+        socket.emit("connectedToMaster", { ...master, deviceModel });
       } else {
         console.log("No master available for client", socket.id);
       }
     }
   });
 
-  socket.on("sendData", (data) => {
+  socket.on("sendData", (message) => {
     const sender = connectedClients[socket.id];
-    console.log(`Data received from client ${socket.id}:`, data, sender);
+    console.log(sender);
+    console.log(`Data received from client ${socket.id}:`, message, sender);
 
     if (sender) {
       // Validate data
-      if (typeof data !== "string" || data.trim() === "") {
+      if (typeof message.data !== "string" || message.data.trim() === "") {
         console.warn("Data must be a string and cannot be empty.");
         return;
       }
 
       if (sender.role === "master") {
         // Exclude the sender and broadcast to all connected clients
-
-        socket.broadcast.emit("receiveData", data);
+        socket.broadcast.emit("receiveData", message);
       } else {
         // Forward data to the master, excluding all clients
         const master = Object.values(connectedClients).find(
@@ -83,11 +110,14 @@ io.on("connection", (socket) => {
         );
         console.log("master", master);
 
-        /// chech here
         if (master) {
-          console.log("master id----->", master.id);
           // socket.broadcast.emit("forwardData", { data, senderId: socket.id });
-          io.to(master.id).emit("forwardData", { data, senderId: socket.id }); // Send data to the master
+          // io.to(master.id).emit("forwardData", { data, senderId: socket.id }); // Send data to the master
+          io.to(master.id).emit("forwardData", {
+            data: message.data,
+            deviceName: message.deviceName,
+            senderId: socket.id,
+          });
         } else {
           console.log(
             "Master not available to forward data from client:",
